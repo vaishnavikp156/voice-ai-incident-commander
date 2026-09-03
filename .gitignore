@@ -1,14 +1,23 @@
 # Python
 __pycache__/
 *.py[cod]
+*$py.class
 venv/
-
-# Environment variables
 .env
 
 # Node
 node_modules/
 dist/
+dist-ssr/
+*.local
 
-# IDE
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editor
 .vscode/
+.idea/
+*.swp
+*.swo

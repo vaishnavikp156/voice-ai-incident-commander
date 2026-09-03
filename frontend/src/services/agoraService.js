@@ -1,7 +1,7 @@
 /**
  * Agora RTC Real-Time Voice Service
- * Manages live voice channels, microphone publishing, volume indicators,
- * and remote participant audio tracks using the Agora RTC Web SDK (agora-rtc-sdk-ng).
+ * Manages RTC channel connection, microphone publishing, volume indication,
+ * and remote AI Agent audio playback using agora-rtc-sdk-ng.
  */
 
 import AgoraRTC from "agora-rtc-sdk-ng";
@@ -14,71 +14,99 @@ class AgoraService {
     this.joined = false;
     this.isMuted = false;
     this.channelName = "incident-pay-2048";
-    this.uid = Math.floor(Math.random() * 100000);
-    this.volumeListeners = new Set();
-    this.userJoinListeners = new Set();
-    this.userLeaveListeners = new Set();
-    this.isMockMode = false;
+    this.uid = Math.floor(Math.random() * 89999 + 10000); // 5-digit UID
+    this.remoteUsers = new Map();
+    this.logCallbacks = new Set();
+    this.volumeCallbacks = new Set();
+    this.remoteUserCallbacks = new Set();
+  }
+
+  log(msg, type = "info") {
+    const entry = {
+      id: Math.random().toString(36).substring(2, 9),
+      time: new Date().toLocaleTimeString(),
+      message: msg,
+      type,
+    };
+    console.log(`[AgoraService][${type.toUpperCase()}] ${msg}`);
+    this.logCallbacks.forEach((cb) => cb(entry));
   }
 
   initClient() {
     if (!this.client) {
       this.client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
 
-      // Handle remote user publishing audio
+      // Handle remote user joining channel
+      this.client.on("user-joined", (user) => {
+        this.log(`[RTC] Remote participant joined channel: UID=${user.uid}`, "info");
+        this.remoteUsers.set(user.uid, user);
+        this.remoteUserCallbacks.forEach((cb) => cb(Array.from(this.remoteUsers.values())));
+      });
+
+      // Handle remote user publishing audio (e.g. Agora Conversational AI Agent)
       this.client.on("user-published", async (user, mediaType) => {
-        await this.client.subscribe(user, mediaType);
-        if (mediaType === "audio") {
-          user.audioTrack?.play();
+        this.log(`[RTC] Remote participant published: UID=${user.uid} (${mediaType})`, "info");
+        try {
+          await this.client.subscribe(user, mediaType);
+          this.log(`[RTC] Subscribed to remote UID=${user.uid} (${mediaType})`, "success");
+
+          if (mediaType === "audio") {
+            if (user.audioTrack) {
+              user.audioTrack.play();
+              this.log(`[RTC] Playing audio track from UID=${user.uid} (Agora Conversational AI Agent)`, "success");
+            } else {
+              this.log(`[RTC] Warning: Remote user ${user.uid} has no audioTrack after subscribe`, "warning");
+            }
+          }
+        } catch (err) {
+          this.log(`[RTC] Failed to subscribe/play audio from UID=${user.uid}: ${err.message}`, "error");
         }
-        this.userJoinListeners.forEach((cb) => cb(user));
+
+        this.remoteUsers.set(user.uid, user);
+        this.remoteUserCallbacks.forEach((cb) => cb(Array.from(this.remoteUsers.values())));
       });
 
       // Handle remote user leaving
       this.client.on("user-unpublished", (user, mediaType) => {
-        this.userLeaveListeners.forEach((cb) => cb(user));
+        this.log(`[RTC] Remote participant unpublished: UID=${user.uid} (${mediaType})`, "info");
       });
 
-      // Volume indicator for real-time speaker detection & waveform
-      AgoraRTC.enableAudioVolumeIndicator();
+      this.client.on("user-left", (user) => {
+        this.log(`[RTC] Remote participant left: UID=${user.uid}`, "info");
+        this.remoteUsers.delete(user.uid);
+        this.remoteUserCallbacks.forEach((cb) => cb(Array.from(this.remoteUsers.values())));
+      });
+
+      // Volume indicator for real-time waveform & speaking detection
+      this.client.enableAudioVolumeIndicator();
       this.client.on("volume-indicator", (volumes) => {
-        this.volumeListeners.forEach((cb) => cb(volumes));
+        this.volumeCallbacks.forEach((cb) => cb(volumes));
       });
     }
     return this.client;
   }
 
-  async joinChannel({ channelName = "incident-pay-2048", uid = null, role = 1, onVolume = null } = {}) {
-    this.channelName = channelName;
+  async joinChannel({ channelName = "incident-pay-2048", uid = null } = {}) {
+    if (channelName) this.channelName = channelName;
     if (uid) this.uid = uid;
-    if (onVolume) this.volumeListeners.add(onVolume);
 
     try {
       this.initClient();
+      this.log(`Requesting server-side RTC token for UID=${this.uid} in channel '${this.channelName}'...`, "info");
 
-      // Fetch dynamic token from backend
-      const tokenData = await apiService.getAgoraToken(this.channelName, this.uid, role);
-      const appId = tokenData.app_id;
-      const token = tokenData.token;
+      // 1. Fetch secure token from FastAPI backend
+      const tokenData = await apiService.getAgoraToken(this.channelName, this.uid, 1);
+      const { app_id: appId, token } = tokenData;
 
-      // If mock/demo mode without real Agora App ID
-      if (tokenData.is_mock || !appId || appId === "demo_agora_app_id" || appId.length < 10) {
-        console.log("[AgoraService] Running in WebRTC / Simulated Voice Room mode");
-        this.isMockMode = true;
-        this.joined = true;
-        return {
-          success: true,
-          isMock: true,
-          channel: this.channelName,
-          uid: this.uid,
-          message: "Connected to Voice Room (Simulated RTC Channel)",
-        };
-      }
+      this.log(`RTC Token received successfully (Length: ${token.length} chars)`, "success");
+      this.log(`Connecting to Agora RTC channel '${this.channelName}' as UID=${this.uid}...`, "info");
 
-      // Production Agora RTC Join
+      // 2. Join Agora RTC Channel
       await this.client.join(appId, this.channelName, token, this.uid);
+      this.log(`Successfully connected to Agora RTC channel '${this.channelName}'`, "success");
 
-      // Create and publish local microphone audio track
+      // 3. Create & publish local microphone audio track
+      this.log("Capturing local microphone stream...", "info");
       this.localAudioTrack = await AgoraRTC.createMicrophoneAudioTrack({
         encoderConfig: "high_quality_stereo",
         AEC: true,
@@ -86,37 +114,27 @@ class AgoraService {
       });
 
       await this.client.publish([this.localAudioTrack]);
+      this.log("Microphone audio track published to Agora RTC channel.", "success");
+
       this.joined = true;
-      this.isMockMode = false;
+      this.isMuted = false;
 
       return {
         success: true,
-        isMock: false,
         channel: this.channelName,
         uid: this.uid,
-        message: "Connected to Agora Live Voice Channel",
       };
     } catch (err) {
-      console.warn("[AgoraService] Agora join fallback triggered:", err);
-      this.isMockMode = true;
-      this.joined = true;
-      return {
-        success: true,
-        isMock: true,
-        channel: this.channelName,
-        uid: this.uid,
-        message: "Connected in Local WebRTC Voice Mode",
-      };
+      this.log(`Failed to join Agora channel: ${err.message}`, "error");
+      throw err;
     }
   }
 
   async toggleMute() {
-    if (this.localAudioTrack) {
-      this.isMuted = !this.isMuted;
-      await this.localAudioTrack.setEnabled(!this.isMuted);
-    } else {
-      this.isMuted = !this.isMuted;
-    }
+    if (!this.localAudioTrack) return this.isMuted;
+    this.isMuted = !this.isMuted;
+    await this.localAudioTrack.setEnabled(!this.isMuted);
+    this.log(`Microphone ${this.isMuted ? "MUTED" : "UNMUTED"}`, this.isMuted ? "warning" : "info");
     return this.isMuted;
   }
 
@@ -127,18 +145,32 @@ class AgoraService {
       this.localAudioTrack = null;
     }
 
-    if (this.client && this.joined && !this.isMockMode) {
+    if (this.client && this.joined) {
       await this.client.leave();
+      this.log("Left Agora RTC channel.", "info");
     }
 
     this.joined = false;
     this.isMuted = false;
+    this.remoteUsers.clear();
+    this.remoteUserCallbacks.forEach((cb) => cb([]));
+
     return { success: true };
   }
 
-  onVolumeIndicator(callback) {
-    this.volumeListeners.add(callback);
-    return () => this.volumeListeners.delete(callback);
+  onLog(cb) {
+    this.logCallbacks.add(cb);
+    return () => this.logCallbacks.delete(cb);
+  }
+
+  onVolume(cb) {
+    this.volumeCallbacks.add(cb);
+    return () => this.volumeCallbacks.delete(cb);
+  }
+
+  onRemoteUsersChange(cb) {
+    this.remoteUserCallbacks.add(cb);
+    return () => this.remoteUserCallbacks.delete(cb);
   }
 }
 

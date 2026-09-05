@@ -4,6 +4,14 @@ EchoSphere is an authentic, real-time Voice AI Incident Commander built with **A
 
 ---
 
+## 🚀 Live Demo
+
+**Live Application:** https://voice-ai-incident-commander-rosy.vercel.app
+
+**Source Code:** https://github.com/vaishnavikp156/voice-ai-incident-commander
+
+---
+
 ## 1. Project Overview
 
 During major production incidents, engineering teams communicate via live voice channels while juggling monitoring dashboards, alerts, and chat rooms. Critical updates, hypotheses, and action items get buried in conversational noise.
@@ -33,7 +41,7 @@ EchoSphere introduces an AI-powered voice co-pilot that participates directly in
 - **Structured Intelligence Extraction:** Automatically categorizes spoken content into structured incident categories.
 - **Action & Owner Tracking:** Identifies tasks, extracts assigned owners, and tracks execution status.
 - **Conflict Highlighting:** Detects contradictory statements between responders or monitoring metrics before misguided actions occur.
-- **Shared Incident Timeline:** Maintains an immutable, timestamped incident timeline and live conversation record.
+- **Shared Incident Timeline:** Maintains a timestamped chronological incident timeline and live conversation record.
 - **Human-in-the-Loop Control:** Provides decision support without ever autonomously executing critical actions on production systems.
 
 ---
@@ -54,7 +62,7 @@ EchoSphere introduces an AI-powered voice co-pilot that participates directly in
 - **Live Incident Timeline:** Chronological event feed capturing intelligence items and status updates as they occur.
 - **Spoken Conversation Transcript:** Complete, speaker-tagged transcript of all spoken dialogue within the incident room.
 - **Interactive Action Management:** One-click UI controls to mark action items as completed, automatically synchronizing with the room timeline.
-- **Incident Data Persistence:** Persistent local JSON storage (`incident_data.json`) ensuring notes, intelligence, and timelines survive browser refreshes.
+- **Incident Data Persistence:** Local JSON persistence (`incident_data.json`) for incident notes, intelligence, and timeline state during development and active server sessions.
 - **Agent Lifecycle Management:** Full lifecycle control to start, stop, and restart the AI agent at any time without resetting room state or intelligence.
 - **Theme Support:** Polished Dark and Light mode interface designed for high-focus operational environments.
 - **Developer Diagnostics:** Expandable developer diagnostic drawer providing real-time visibility into Agora RTC states, agent session IDs, and API telemetry without cluttering the primary incident board.
@@ -88,8 +96,8 @@ Agora provides the foundational real-time communication and conversational AI in
    - The AI agent joins with a dedicated RTC UID (`9999`) as an active peer on the audio bridge.
 
 3. **Multi-Party Listening & Voice Response:**
-   - The AI agent subscribes to all human audio streams in the channel, transcribes spoken dialogue via real-time speech recognition (ASR), and processes the context with an incident commander system prompt.
-   - The agent synthesizes speech (TTS) and publishes native audio back into the Agora RTC channel, allowing responders to hear the AI commander directly in their headsets.
+   - Agora Conversational AI Agent orchestrates the real-time speech recognition (ASR), contextual LLM reasoning, and speech synthesis (TTS) pipeline while participating directly in the Agora RTC channel.
+   - The AI agent subscribes to human audio streams across all responders in the channel, processes spoken incident dialogue with a dedicated incident commander system prompt, and publishes synthesized voice responses back into the Agora RTC audio bridge so responders hear the AI commander in real time.
 
 4. **Agent Lifecycle Management:**
    - The FastAPI backend interacts directly with Agora's RESTful API endpoints to initiate (`join`), disconnect (`leave`), and inspect the conversational agent's real-time status and conversational turn history.
@@ -124,9 +132,9 @@ Agora provides the foundational real-time communication and conversational AI in
                                                            v
                                         +---------------------------------------+
                                         |    Speech & Intelligence Pipeline     |
-                                        |   - Agora ASR (Speech Recognition)    |
-                                        |   - Contextual Incident Prompt        |
-                                        |   - Agora TTS (Audio Synthesis)       |
+                                        |   - Real-time Speech Recognition (ASR)|
+                                        |   - Contextual Incident Prompt / LLM  |
+                                        |   - Text-to-Speech (TTS)              |
                                         |   - Intelligence Classification Engine|
                                         +---------------------------------------+
                                                            |
@@ -169,8 +177,8 @@ Agora provides the foundational real-time communication and conversational AI in
 - **Official Agora Token Builder (`agora_token.py` / `agora-token-builder`):** Secure dynamic RTC token generation.
 
 ### Agora Cloud Services
-- **Agora Real-Time Communication (RTC):** Low-latency multi-party voice channel.
-- **Agora Conversational AI Agent REST API v2:** Cloud agent deployment, real-time speech-to-text, LLM orchestration, and text-to-speech synthesis.
+- **Agora Real-Time Communication (RTC):** Low-latency multi-party voice channel and real-time audio transport.
+- **Agora Conversational AI Agent REST API v2:** Cloud agent deployment and orchestration across real-time speech recognition (ASR), LLM reasoning, and speech synthesis (TTS) pipelines participating directly in RTC voice channels.
 
 ---
 
@@ -185,13 +193,15 @@ voice-ai-incident-commander/
 │   ├── main.py                         # Application entrypoint & REST API endpoints
 │   ├── agora_convo_ai.py               # Agora agent manager & intelligence classification
 │   ├── agora_token.py                  # Agora RTC token generator
+│   ├── integrations.py                 # Jira, Slack, PagerDuty & Monitoring connectors
+│   ├── test_improvements.py            # Unit & integration verification suite
 │   ├── requirements.txt                # Python backend dependencies
-│   ├── incident_data.json              # Persistent incident records, notes & timeline
+│   ├── incident_data.json              # Local JSON persistence for notes, intelligence & timeline state
 │   ├── .env.example                    # Template for environment configuration
 │   └── .env                            # Local configuration (never committed)
 │
 └── frontend/                           # React + Vite Frontend
-    ├── index.html                      # HTML template
+    ├── index.html                      # HTML entrypoint
     ├── package.json                    # Frontend dependencies & scripts
     ├── vite.config.js                  # Vite configuration
     └── src/
@@ -204,8 +214,10 @@ voice-ai-incident-commander/
         │   ├── ConnectionStatePill.jsx # Agora RTC & Agent status indicators
         │   ├── ConsoleLogs.jsx         # Collapsible Developer Diagnostics drawer
         │   ├── IncidentIntelligence.jsx# 5-column intelligence board & timeline
+        │   ├── IncidentSummary.jsx     # Situational summary, key facts & risk panel
+        │   ├── IntegrationsPanel.jsx   # Jira, Slack, PagerDuty & Telemetry Hub
         │   ├── JoinRoomModal.jsx       # Modal for creating/joining incident rooms
-        │   └── SettingsModal.jsx       # Modal for updating Agora credentials
+        │   └── SettingsModal.jsx       # Modal for runtime Agora configuration
         └── services/
             ├── agoraService.js         # Agora RTC Web SDK client management
             └── apiService.js           # Frontend REST client for backend APIs
@@ -399,6 +411,12 @@ All backend endpoints are implemented in `backend/main.py`:
 | `POST` | `/api/incident/new` | Initializes a new incident room with a unique room code and clean boards. |
 | `POST` | `/api/incident/join` | Registers a responder's presence, display name, and role in an incident room. |
 | `POST` | `/api/incident/action/update` | Updates the status of an assigned action item (e.g., marks as Completed). |
+| `GET` | `/api/integrations/status` | Reports configuration and connection status for Jira, Slack, PagerDuty, and Telemetry. |
+| `POST` | `/api/integrations/jira/issue` | Creates a Jira tracking issue from an incident action item or summary. |
+| `POST` | `/api/integrations/slack/broadcast` | Broadcasts structured incident situation updates to Slack. |
+| `POST` | `/api/integrations/pagerduty/trigger` | Triggers or synchronizes incident alerts with PagerDuty. |
+| `GET` | `/api/integrations/monitoring/metrics` | Fetches telemetry metrics for system health monitoring. |
+| `POST` | `/api/integrations/monitoring/correlate` | Correlates a telemetry metric into the incident room as a verified fact. |
 | `POST` | `/api/settings` | Updates and persists Agora credentials at runtime. |
 
 ---

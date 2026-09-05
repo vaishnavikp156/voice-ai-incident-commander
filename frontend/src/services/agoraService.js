@@ -105,12 +105,13 @@ class AgoraService {
       await this.client.join(appId, this.channelName, token, this.uid);
       this.log(`Successfully connected to Agora RTC channel '${this.channelName}'`, "success");
 
-      // 3. Create & publish local microphone audio track
-      this.log("Capturing local microphone stream...", "info");
+      // 3. Create & publish local microphone audio track optimized for speech STT
+      this.log("Capturing local microphone stream (speech_standard, AEC, ANS, AGC)...", "info");
       this.localAudioTrack = await AgoraRTC.createMicrophoneAudioTrack({
-        encoderConfig: "high_quality_stereo",
+        encoderConfig: "speech_standard",
         AEC: true,
         ANS: true,
+        AGC: true,
       });
 
       await this.client.publish([this.localAudioTrack]);
@@ -156,6 +157,28 @@ class AgoraService {
     this.remoteUserCallbacks.forEach((cb) => cb([]));
 
     return { success: true };
+  }
+
+  removeRemoteUser(uid) {
+    let changed = false;
+    if (this.remoteUsers.has(uid)) {
+      this.remoteUsers.delete(uid);
+      changed = true;
+    }
+    const numUid = Number(uid);
+    if (!isNaN(numUid) && this.remoteUsers.has(numUid)) {
+      this.remoteUsers.delete(numUid);
+      changed = true;
+    }
+    const strUid = String(uid);
+    if (this.remoteUsers.has(strUid)) {
+      this.remoteUsers.delete(strUid);
+      changed = true;
+    }
+    if (changed) {
+      this.log(`[RTC] Removed remote UID=${uid} from local state`, "info");
+      this.remoteUserCallbacks.forEach((cb) => cb(Array.from(this.remoteUsers.values())));
+    }
   }
 
   onLog(cb) {

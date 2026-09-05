@@ -1,7 +1,8 @@
 """
 Voice AI Incident Commander - FastAPI Backend
 Manages Agora RTC Tokens & Agora Conversational AI Agent REST API endpoints.
-Version 1.0.2
+Provides Multi-Person Incident Room engine with shared intelligence and persistent transcripts.
+Version 1.1.0
 """
 
 import logging
@@ -23,8 +24,8 @@ load_dotenv()
 
 app = FastAPI(
     title="EchoSphere Voice AI Incident Commander Backend",
-    description="Agora RTC & Conversational AI Backend API",
-    version="1.0.2",
+    description="Agora RTC & Conversational AI Multi-Person Incident Backend API",
+    version="1.1.0",
 )
 
 # Enable CORS for Vite frontend
@@ -85,6 +86,24 @@ class AgentStopRequest(BaseModel):
     agent_id: Optional[str] = None
 
 
+class IncidentNewRequest(BaseModel):
+    channel_name: Optional[str] = None
+
+
+class IncidentJoinRequest(BaseModel):
+    code: str
+    uid: int
+    display_name: str = "Engineer"
+    role: Optional[str] = "Incident Responder"
+
+
+class ActionUpdateRequest(BaseModel):
+    code: Optional[str] = None
+    channel_name: Optional[str] = None
+    action_id: str
+    status: str = "Completed"
+
+
 class SettingsRequest(BaseModel):
     agora_app_id: Optional[str] = None
     agora_app_certificate: Optional[str] = None
@@ -95,10 +114,13 @@ class SettingsRequest(BaseModel):
 
 @app.get("/")
 def root():
+    active_inc = agora_convo_ai_manager.get_incident()
     return {
         "service": "EchoSphere Voice AI Incident Commander",
         "agora_conversational_ai": "enabled",
         "status": "online",
+        "active_incident_id": active_inc.get("incident_id"),
+        "active_channel_name": active_inc.get("channel_name"),
     }
 
 
@@ -109,7 +131,8 @@ def health_check():
     app_cert = (agora_convo_ai_manager.app_certificate or os.getenv("AGORA_APP_CERTIFICATE", "")).strip()
     customer_id = (agora_convo_ai_manager.customer_id or os.getenv("AGORA_CUSTOMER_ID", "")).strip()
     customer_secret = (agora_convo_ai_manager.customer_secret or os.getenv("AGORA_CUSTOMER_SECRET", "")).strip()
-    channel_name = (agora_convo_ai_manager.channel_name or os.getenv("AGORA_CHANNEL_NAME", "incident-pay-2048")).strip()
+
+    active_inc = agora_convo_ai_manager.get_incident()
 
     return {
         "status": "healthy",
@@ -117,7 +140,9 @@ def health_check():
         "agora_app_id_configured": bool(app_id),
         "agora_app_certificate_configured": bool(app_cert),
         "agora_convo_ai_configured": bool(customer_id and customer_secret),
-        "channel_name": channel_name,
+        "channel_name": active_inc.get("channel_name"),
+        "incident_id": active_inc.get("incident_id"),
+        "room_code": active_inc.get("room_code"),
         "customer_id_set": bool(customer_id),
         "customer_secret_set": bool(customer_secret),
     }
@@ -158,7 +183,7 @@ def get_agora_token(req: TokenRequest):
 
 @app.post("/api/agora/agent/start")
 async def start_agora_agent(req: AgentStartRequest):
-    """Start the official Agora Conversational AI Agent in the specified channel."""
+    """Start the official Agora Conversational AI Agent in the specified room."""
     logger.info(f"[AgentAPI] Starting Agora Conversational AI Agent in channel '{req.channel_name}'...")
     result = await agora_convo_ai_manager.start_agent(
         channel_name=req.channel_name,
@@ -169,19 +194,99 @@ async def start_agora_agent(req: AgentStartRequest):
 
 @app.post("/api/agora/agent/stop")
 async def stop_agora_agent(req: AgentStopRequest):
-    """Stop the official Agora Conversational AI Agent."""
-    logger.info(f"[AgentAPI] Stopping Agora Conversational AI Agent in channel '{req.channel_name}'...")
+    """
+    Stop the official Agora Conversational AI Agent.
+    Preserves all extracted intelligence, timeline, and transcript records.
+    """
+    logger.info(f"[AgentAPI] Stop requested for channel '{req.channel_name}' (agent_id={req.agent_id})")
     result = await agora_convo_ai_manager.stop_agent(
         channel_name=req.channel_name,
         agent_id=req.agent_id,
     )
+    inc_snapshot = result.get("incident", {})
+    logger.info(f"[AgentAPI] Stop API completed for channel '{req.channel_name}': status={result.get('status')}, incident_agent_status={inc_snapshot.get('agent_status')}")
     return result
 
 
 @app.get("/api/agora/agent/status")
-def get_agora_agent_status(channel_name: str = "incident-pay-2048"):
+def get_agora_agent_status(channel_name: Optional[str] = None):
     """Get the running status of the Agora Conversational AI Agent."""
     return agora_convo_ai_manager.get_agent_status(channel_name=channel_name)
+
+
+@app.get("/api/agora/agent/history")
+async def get_agora_agent_history(channel_name: Optional[str] = None):
+    """Fetch raw conversation turns from the active Agora Conversational AI agent."""
+    return await agora_convo_ai_manager.get_agent_history(channel_name=channel_name)
+
+
+@app.get("/api/incident/intelligence")
+async def get_incident_intelligence(
+    channel_name: Optional[str] = None,
+    incident_id: Optional[str] = None,
+):
+    """
+    Extract structured incident intelligence (Facts, Hypotheses, Decisions, Actions, Conflicts)
+    and conversation transcript for a specific incident room.
+    """
+    return await agora_convo_ai_manager.get_incident_intelligence(
+        channel_name=channel_name,
+        incident_id=incident_id,
+    )
+
+
+@app.get("/api/incident/current")
+def get_current_incident(identifier: Optional[str] = None):
+    """Get snapshot of current persistent incident record."""
+    return agora_convo_ai_manager.get_incident_record_snapshot(identifier=identifier)
+
+
+@app.get("/api/incident/lookup/{code}")
+def lookup_incident_by_code(code: str):
+    """Lookup incident room metadata by room code or channel name."""
+    incident = agora_convo_ai_manager.get_incident(code)
+    return agora_convo_ai_manager.get_incident_record_snapshot(incident.get("incident_id"))
+
+
+@app.post("/api/incident/new")
+def create_new_incident(req: IncidentNewRequest = IncidentNewRequest()):
+    """
+    Start a fresh incident record with a unique room code and clean board/notes.
+    Does NOT affect Agora credentials or active RTC join.
+    """
+    logger.info(f"[IncidentAPI] Initiating new incident (channel={req.channel_name})")
+    return agora_convo_ai_manager.create_new_incident(channel_name=req.channel_name)
+
+
+@app.post("/api/incident/join")
+def join_incident_room(req: IncidentJoinRequest):
+    """
+    Register a participant's presence and display name in an incident room.
+    """
+    logger.info(f"[IncidentAPI] User '{req.display_name}' (UID {req.uid}) joining room '{req.code}'")
+    agora_convo_ai_manager.register_participant(
+        identifier=req.code,
+        uid=req.uid,
+        display_name=req.display_name,
+        role=req.role or "Incident Responder",
+    )
+    incident = agora_convo_ai_manager.get_incident(req.code)
+    return agora_convo_ai_manager.get_incident_record_snapshot(incident.get("incident_id"))
+
+
+@app.post("/api/incident/action/update")
+def update_action_status(req: ActionUpdateRequest):
+    """
+    Update the status of an assigned action item (e.g. Completed).
+    Preserves action in persistent record and updates timeline.
+    """
+    identifier = req.code or req.channel_name
+    logger.info(f"[IncidentAPI] Updating action '{req.action_id}' status to '{req.status}' for room '{identifier}'")
+    return agora_convo_ai_manager.update_action_status(
+        identifier=identifier,
+        action_id=req.action_id,
+        status=req.status,
+    )
 
 
 @app.post("/api/settings")

@@ -1,6 +1,7 @@
 /**
  * API Service
  * Handles communication with the FastAPI Voice AI backend for Agora tokens & Conversational AI.
+ * Supports Multi-Person Incident Rooms, shared intelligence, participant presence, and transcripts.
  */
 
 const API_BASE = "http://localhost:8000";
@@ -60,6 +61,122 @@ class ApiService {
     } catch (err) {
       console.warn("[ApiService] Error getting agent status:", err);
       return { is_active: false, status: "IDLE" };
+    }
+  }
+
+  async getIntelligence(channelName = "incident-pay-2048", incidentId = null) {
+    try {
+      let url = `${API_BASE}/api/incident/intelligence?channel_name=${encodeURIComponent(channelName)}`;
+      if (incidentId) {
+        url += `&incident_id=${encodeURIComponent(incidentId)}`;
+      }
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("Failed to get intelligence");
+      return await res.json();
+    } catch (err) {
+      console.warn("[ApiService] Error getting incident intelligence:", err);
+      return {
+        incident_id: incidentId || "INC-2048",
+        channel_name: channelName,
+        status: "Active",
+        agent_status: "IDLE",
+        facts: [],
+        hypotheses: [],
+        decisions: [],
+        actions: [],
+        conflicts: [],
+        transcript: [],
+        timeline: [],
+        participants: [],
+        total_items: 0,
+      };
+    }
+  }
+
+  async getCurrentIncident(identifier = null) {
+    try {
+      const url = identifier ? `${API_BASE}/api/incident/current?identifier=${encodeURIComponent(identifier)}` : `${API_BASE}/api/incident/current`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("Failed to get current incident");
+      return await res.json();
+    } catch (err) {
+      console.warn("[ApiService] Error getting current incident:", err);
+      return null;
+    }
+  }
+
+  async createNewIncident(channelName = null) {
+    const res = await fetch(`${API_BASE}/api/incident/new`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channel_name: channelName }),
+    });
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.detail || "Failed to create new incident");
+    }
+
+    return await res.json();
+  }
+
+  async lookupIncident(code) {
+    const res = await fetch(`${API_BASE}/api/incident/lookup/${encodeURIComponent(code)}`);
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.detail || `Incident room '${code}' not found`);
+    }
+    return await res.json();
+  }
+
+  async joinIncidentRoom(code, uid, displayName, role = "Incident Responder") {
+    const res = await fetch(`${API_BASE}/api/incident/join`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        code,
+        uid,
+        display_name: displayName,
+        role,
+      }),
+    });
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.detail || "Failed to register in incident room");
+    }
+
+    return await res.json();
+  }
+
+  async updateActionStatus(codeOrChannel, actionId, status = "Completed") {
+    const res = await fetch(`${API_BASE}/api/incident/action/update`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        code: codeOrChannel,
+        channel_name: codeOrChannel,
+        action_id: actionId,
+        status,
+      }),
+    });
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.detail || "Failed to update action status");
+    }
+
+    return await res.json();
+  }
+
+  async getAgentHistory(channelName = "incident-pay-2048") {
+    try {
+      const res = await fetch(`${API_BASE}/api/agora/agent/history?channel_name=${encodeURIComponent(channelName)}`);
+      if (!res.ok) throw new Error("Failed to get history");
+      return await res.json();
+    } catch (err) {
+      console.warn("[ApiService] Error getting agent history:", err);
+      return { contents: [] };
     }
   }
 

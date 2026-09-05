@@ -159,8 +159,8 @@ export function IncidentIntelligence({
           <div className="card-content">
             {facts.length === 0 ? (
               <div className="empty-intel-state">
-                <p>No confirmed facts yet.</p>
-                <span>State technical observations to the AI Commander.</span>
+                <p>No confirmed facts yet</p>
+                <span>Speak an observed system condition to the AI Commander.</span>
               </div>
             ) : (
               <ul className="intel-list">
@@ -190,8 +190,8 @@ export function IncidentIntelligence({
           <div className="card-content">
             {hypotheses.length === 0 ? (
               <div className="empty-intel-state">
-                <p>No active hypotheses.</p>
-                <span>Voice unverified root-cause theories.</span>
+                <p>No active hypotheses</p>
+                <span>Voice unverified root-cause theories or assumptions.</span>
               </div>
             ) : (
               <ul className="intel-list">
@@ -223,8 +223,8 @@ export function IncidentIntelligence({
           <div className="card-content">
             {decisions.length === 0 ? (
               <div className="empty-intel-state">
-                <p>No decisions recorded yet.</p>
-                <span>Explicitly agree on mitigation steps.</span>
+                <p>No decisions recorded yet</p>
+                <span>State agreed mitigation decisions to lock them in.</span>
               </div>
             ) : (
               <ul className="intel-list">
@@ -259,7 +259,7 @@ export function IncidentIntelligence({
           <div className="card-content">
             {actions.length === 0 ? (
               <div className="empty-intel-state">
-                <p>No pending action items.</p>
+                <p>No pending actions</p>
                 <span>Assign tasks like "@SRE drain affected pods".</span>
               </div>
             ) : (
@@ -333,8 +333,8 @@ export function IncidentIntelligence({
           <div className="card-content">
             {conflicts.length === 0 ? (
               <div className="empty-intel-state">
-                <p>No conflicts detected.</p>
-                <span>AI flags contradictory claims between engineers.</span>
+                <p>No conflicts detected</p>
+                <span>Contradictory claims between responders are flagged here automatically.</span>
               </div>
             ) : (
               <ul className="intel-list">

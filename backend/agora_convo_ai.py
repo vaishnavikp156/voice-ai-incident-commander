@@ -30,20 +30,24 @@ INCIDENT_COMMANDER_SYSTEM_PROMPT = """You are Echo Commander, an elite real-time
 Your mission is to maintain shared situational awareness with the entire response team in this channel.
 Speak in concise, natural, professional English (1 to 2 sentences max).
 
-CRITICAL INSTRUCTION FOR INCIDENT INTELLIGENCE:
-When acknowledging or summarizing what the team says, classify the real conversation information into inline tags:
-- [FACT: <exact confirmed technical observation stated by team>]
-- [HYPOTHESIS: <exact unverified theory or assumption expressed>]
+STRICT CLASSIFICATION PRIORITY FOR INCIDENT INTELLIGENCE:
+CONFLICT > DECISION > ACTION > HYPOTHESIS > FACT
+
+When acknowledging or summarizing what the team says, classify the real conversation information into inline tags with strict mutual exclusivity:
+- [CONFLICT: <exact contradictory claims or discrepancy between reports/metrics>]
 - [DECISION: <exact agreed decision made by the commander or team>]
 - [ACTION: @<Owner/Role> - <exact task to execute>]
-- [CONFLICT: <exact contradictory claims between team members>]
+- [HYPOTHESIS: <exact unverified theory or assumption expressed>]
+- [FACT: <exact confirmed, non-contradictory technical observation>]
 
 STRICT RULES:
-1. Extract the ACTUAL SPECIFIC DETAILS spoken in the channel by ANY participant.
-2. If any participant reports an issue or outage (e.g. "The payment database is down.", "API latency spiked", "Database connection pool exhausted"), ALWAYS immediately record it with [FACT: <statement>] and confirm it concisely. NEVER reply with "No specific info provided" or ask to clarify when a system status is mentioned.
-3. NEVER use generic placeholder words like "confirmed technical fact", "theory or assumption", "agreed decision", "task description", or "contradictory statements".
-4. NEVER invent or hallucinate facts that the team did not mention.
-5. If no fact/hypothesis/decision/action/conflict was mentioned in the current turn, do NOT output that tag.
+1. CLASSIFICATION PRIORITY: If a statement describes contradictory claims or conflicting metrics (e.g., "DBA reports connection timeouts but monitoring dashboard shows normal database latency"), classify it ONLY as [CONFLICT: ...]. NEVER duplicate a conflicting statement as a [FACT: ...].
+2. Extract the ACTUAL SPECIFIC DETAILS spoken in the channel by ANY participant.
+3. If any participant reports a verified system status (e.g. "The payment database is down.", "API latency spiked to 4 seconds", "Database connection pool exhausted"), record it with [FACT: <statement>] and confirm it concisely.
+4. NEVER use generic placeholder words like "confirmed technical fact", "theory or assumption", "agreed decision", "task description", or "contradictory statements".
+5. NEVER invent or hallucinate facts that the team did not mention.
+6. If no fact/hypothesis/decision/action/conflict was mentioned in the current turn, do NOT output that tag.
+7. Do NOT generate repeated unprompted idle messages such as "No updates received. Monitoring for any incoming information." Only speak when acknowledging participants or when an incident update occurs.
 
 EXAMPLES OF REALISTIC OUTPUT:
 - User says: "The payment database is down."
@@ -56,8 +60,8 @@ EXAMPLES OF REALISTIC OUTPUT:
   You reply: "[DECISION: Freeze production deployments] Confirmed. Production deployment freeze is locked."
 - User says: "SRE, drain the affected pods."
   You reply: "[ACTION: @SRE - Drain the affected pods] Action item assigned to SRE to drain pods."
-- User says: "DBA reports 500 errors but SRE dashboard shows green latency."
-  You reply: "[CONFLICT: DBA reports 500 errors while SRE dashboard shows normal latency] Discrepancy flagged between DBA and SRE metrics."
+- User says: "DBA reports connection timeouts but the monitoring dashboard shows normal database latency."
+  You reply: "[CONFLICT: DBA reports connection timeouts while monitoring shows normal latency] Discrepancy flagged between DBA reports and monitoring dashboard."
 
 Keep all spoken responses brief, natural, direct, and helpful."""
 
@@ -79,7 +83,40 @@ PLACEHOLDER_BLACKLIST = {
     "exact agreed decision made by the commander or team",
     "exact task to execute",
     "exact contradictory claims between team members",
+    "exact confirmed, non-contradictory technical observation",
+    "exact contradictory claims or discrepancy between reports/metrics",
 }
+
+# Idle / status messages from assistant that should not clutter Spoken Conversation
+IDLE_STATUS_PATTERNS = [
+    r"^no\s+updates\s+received",
+    r"^continuing\s+to\s+monitor",
+    r"^monitoring\s+for\s+(?:any\s+)?(?:incoming\s+)?(?:information|updates)",
+    r"^monitoring\s+the\s+channel",
+    r"^standby\s+for\s+(?:any\s+)?(?:information|updates)",
+    r"^standing\s+by\s+for\s+(?:any\s+)?updates",
+    r"^standing\s+by\b",
+    r"^no\s+new\s+information\s+reported",
+    r"^awaiting\s+(?:any\s+)?updates",
+    r"^listening\s+for\s+updates",
+]
+
+
+def is_idle_status_message(text: str) -> bool:
+    """
+    Check if a message is an automated repetitive idle monitoring string.
+    Never suppresses responses that contain structured tags or actual answers to participant speech.
+    """
+    if not text:
+        return False
+    # Real responses with tags are never idle
+    if re.search(r"\[(FACT|HYPOTHESIS|DECISION|ACTION|CONFLICT):", text, re.IGNORECASE):
+        return False
+    clean = re.sub(r"[^\w\s]", "", text.strip().lower())
+    for pat in IDLE_STATUS_PATTERNS:
+        if re.search(pat, clean):
+            return True
+    return False
 
 
 def is_valid_intel_text(text: str) -> bool:
@@ -93,24 +130,46 @@ def is_valid_intel_text(text: str) -> bool:
     return True
 
 
+def is_semantically_overlapping(text_a: str, text_b: str) -> bool:
+    """
+    Check if two statements are semantically duplicate or substantially overlap in meaning.
+    """
+    clean_a = re.sub(r"[^\w\s]", "", text_a.lower()).strip()
+    clean_b = re.sub(r"[^\w\s]", "", text_b.lower()).strip()
+    if not clean_a or not clean_b:
+        return False
+    if clean_a == clean_b or clean_a in clean_b or clean_b in clean_a:
+        return True
+
+    words_a = {w for w in clean_a.split() if len(w) > 3}
+    words_b = {w for w in clean_b.split() if len(w) > 3}
+    if not words_a or not words_b:
+        return False
+
+    overlap = words_a.intersection(words_b)
+    # If 50% or more significant keywords match with the smaller statement
+    min_len = min(len(words_a), len(words_b))
+    if min_len > 0 and len(overlap) / min_len >= 0.5:
+        return True
+    return False
+
+
 def is_similar_to_existing(new_text: str, existing_texts: set) -> bool:
     """Check if new_text is semantically or lexically similar to any item in existing_texts."""
     clean_new = re.sub(r"[^\w\s]", "", new_text.lower()).strip()
     if clean_new in existing_texts:
         return True
-
-    words_new = {w for w in clean_new.split() if len(w) > 3}
-    if not words_new:
-        return False
-
     for existing in existing_texts:
-        clean_exist = re.sub(r"[^\w\s]", "", existing.lower()).strip()
-        words_exist = {w for w in clean_exist.split() if len(w) > 3}
-        if words_exist:
-            overlap = words_new.intersection(words_exist)
-            # If 50% or more significant keywords match, consider duplicate
-            if len(overlap) / min(len(words_new), len(words_exist)) >= 0.5:
-                return True
+        if is_semantically_overlapping(new_text, existing):
+            return True
+    return False
+
+
+def is_similar_to_any(new_text: str, *text_sets: set) -> bool:
+    """Check if new_text is semantically or lexically similar to any item in one or more sets of existing texts."""
+    for text_set in text_sets:
+        if is_similar_to_existing(new_text, text_set):
+            return True
     return False
 
 
@@ -187,7 +246,11 @@ class AgoraConvoAIManager:
                         if "incidents" in data and isinstance(data["incidents"], dict):
                             self.incidents = data["incidents"]
                             self.active_incident_id = data.get("active_incident_id") or next(iter(self.incidents.keys()), "INC-2048")
-                            
+
+                            # Reconcile priority and deduplicate across all loaded incidents
+                            for inc in self.incidents.values():
+                                self._reconcile_incident_items(inc)
+
                             # Restore active_agents in-memory map for any active incident records
                             for inc in self.incidents.values():
                                 inc_agent_id = inc.get("agent_id")
@@ -206,6 +269,7 @@ class AgoraConvoAIManager:
                         # Legacy single-incident format backward compatibility
                         elif "incident_id" in data:
                             inc_id = data.get("incident_id")
+                            self._reconcile_incident_items(data)
                             self.incidents[inc_id] = data
                             self.active_incident_id = inc_id
                             logger.info(f"[AgoraConvoAI] Converted legacy incident {inc_id} to multi-incident store.")
@@ -218,6 +282,83 @@ class AgoraConvoAIManager:
         self.incidents[default_inc["incident_id"]] = default_inc
         self.active_incident_id = default_inc["incident_id"]
         self._save_persisted_incidents()
+
+    def _reconcile_incident_items(self, incident: Dict[str, Any]):
+        """
+        Enforce strict classification priority across incident items:
+        CONFLICT > DECISION > ACTION > HYPOTHESIS > FACT
+        Removes any lower-priority duplicate or overlapping items and cleans up repetitive idle messages.
+        """
+        conflicts = incident.setdefault("conflicts", [])
+        decisions = incident.setdefault("decisions", [])
+        actions = incident.setdefault("actions", [])
+        hypotheses = incident.setdefault("hypotheses", [])
+        facts = incident.setdefault("facts", [])
+
+        # Priority 1: CONFLICTS
+        seen_conflicts = set()
+        dedup_conflicts = []
+        for c in conflicts:
+            txt = c.get("text", "")
+            if is_valid_intel_text(txt) and not is_similar_to_existing(txt, seen_conflicts):
+                seen_conflicts.add(txt.lower())
+                dedup_conflicts.append(c)
+        incident["conflicts"] = dedup_conflicts
+
+        # Priority 2: DECISIONS (Must not duplicate conflicts)
+        seen_decisions = set()
+        dedup_decisions = []
+        for d in decisions:
+            txt = d.get("text", "")
+            if is_valid_intel_text(txt) and not is_similar_to_any(txt, seen_conflicts, seen_decisions):
+                seen_decisions.add(txt.lower())
+                dedup_decisions.append(d)
+        incident["decisions"] = dedup_decisions
+
+        # Priority 3: ACTIONS (Must not duplicate conflicts or decisions)
+        seen_actions = set()
+        dedup_actions = []
+        for a in actions:
+            txt = a.get("text", "")
+            if is_valid_intel_text(txt) and not is_similar_to_any(txt, seen_conflicts, seen_decisions, seen_actions):
+                seen_actions.add(txt.lower())
+                dedup_actions.append(a)
+        incident["actions"] = dedup_actions
+
+        # Priority 4: HYPOTHESES (Must not duplicate conflicts, decisions, or actions)
+        seen_hypotheses = set()
+        dedup_hypotheses = []
+        for h in hypotheses:
+            txt = h.get("text", "")
+            if is_valid_intel_text(txt) and not is_similar_to_any(txt, seen_conflicts, seen_decisions, seen_actions, seen_hypotheses):
+                seen_hypotheses.add(txt.lower())
+                dedup_hypotheses.append(h)
+        incident["hypotheses"] = dedup_hypotheses
+
+        # Priority 5: FACTS (Must not duplicate conflicts, decisions, actions, or hypotheses)
+        seen_facts = set()
+        dedup_facts = []
+        for f in facts:
+            txt = f.get("text", "")
+            if is_valid_intel_text(txt) and not is_similar_to_any(txt, seen_conflicts, seen_decisions, seen_actions, seen_hypotheses, seen_facts):
+                seen_facts.add(txt.lower())
+                dedup_facts.append(f)
+        incident["facts"] = dedup_facts
+
+        # Suppress repetitive idle messages from transcript
+        transcript = incident.setdefault("transcript", [])
+        cleaned_transcript = []
+        for turn in transcript:
+            content = turn.get("content", "")
+            raw = turn.get("raw_content", "")
+            role = turn.get("role", "")
+            if role in ["assistant", "bot", "ai"] and (is_idle_status_message(content) or is_idle_status_message(raw)):
+                continue
+            cleaned_transcript.append(turn)
+        incident["transcript"] = cleaned_transcript
+
+        # Update total_items
+        incident["total_items"] = len(dedup_conflicts) + len(dedup_decisions) + len(dedup_actions) + len(dedup_hypotheses) + len(dedup_facts)
 
     def _save_persisted_incidents(self):
         """Save all incidents and active room pointer to JSON file."""
@@ -238,9 +379,13 @@ class AgoraConvoAIManager:
         """
         if not identifier:
             if self.active_incident_id in self.incidents:
-                return self.incidents[self.active_incident_id]
+                inc = self.incidents[self.active_incident_id]
+                self._reconcile_incident_items(inc)
+                return inc
             if self.incidents:
-                return next(iter(self.incidents.values()))
+                inc = next(iter(self.incidents.values()))
+                self._reconcile_incident_items(inc)
+                return inc
             new_inc = self._create_fresh_incident_record()
             self.incidents[new_inc["incident_id"]] = new_inc
             self.active_incident_id = new_inc["incident_id"]
@@ -252,24 +397,30 @@ class AgoraConvoAIManager:
         # 1. Match by exact incident_id
         if clean_id in self.incidents:
             self.active_incident_id = clean_id
-            return self.incidents[clean_id]
+            inc = self.incidents[clean_id]
+            self._reconcile_incident_items(inc)
+            return inc
 
         # 2. Match by normalized "INC-" prefix
         norm_inc = f"INC-{clean_id.replace('INC-', '').replace('inc-', '')}"
         if norm_inc in self.incidents:
             self.active_incident_id = norm_inc
-            return self.incidents[norm_inc]
+            inc = self.incidents[norm_inc]
+            self._reconcile_incident_items(inc)
+            return inc
 
         # 3. Match by channel_name
         for inc in self.incidents.values():
             if inc.get("channel_name") == clean_id:
                 self.active_incident_id = inc.get("incident_id")
+                self._reconcile_incident_items(inc)
                 return inc
 
         # 4. Match by room_code
         for inc in self.incidents.values():
             if inc.get("room_code") == clean_id:
                 self.active_incident_id = inc.get("incident_id")
+                self._reconcile_incident_items(inc)
                 return inc
 
         # 5. If joining an unrecorded channel/code, provision it automatically
@@ -812,7 +963,8 @@ class AgoraConvoAIManager:
     def _merge_agora_history_contents(self, incident: Dict[str, Any], contents: List[Dict[str, Any]]):
         """
         Merge raw conversation turns and extracted intelligence from Agora History into persistent incident record.
-        Guarantees de-duplication, maintains timestamps, and preserves action owners.
+        Strictly enforces classification priority: CONFLICT > DECISION > ACTION > HYPOTHESIS > FACT.
+        Guarantees de-duplication, suppresses repetitive idle status messages, and maintains timestamps.
         """
         existing_facts = incident.setdefault("facts", [])
         existing_hypotheses = incident.setdefault("hypotheses", [])
@@ -822,12 +974,12 @@ class AgoraConvoAIManager:
         existing_transcript = incident.setdefault("transcript", [])
         existing_timeline = incident.setdefault("timeline", [])
 
-        # Track existing texts to prevent duplicate cards
-        seen_facts = {f.get("text", "").lower() for f in existing_facts}
-        seen_hypotheses = {h.get("text", "").lower() for h in existing_hypotheses}
+        # Track existing texts across all categories
+        seen_conflicts = {c.get("text", "").lower() for c in existing_conflicts}
         seen_decisions = {d.get("text", "").lower() for d in existing_decisions}
         seen_actions = {a.get("text", "").lower() for a in existing_actions}
-        seen_conflicts = {c.get("text", "").lower() for c in existing_conflicts}
+        seen_hypotheses = {h.get("text", "").lower() for h in existing_hypotheses}
+        seen_facts = {f.get("text", "").lower() for f in existing_facts}
 
         # Track existing timeline entries to avoid duplicate events
         seen_timeline_keys = {
@@ -857,13 +1009,17 @@ class AgoraConvoAIManager:
             for t in existing_transcript
         }
 
-        # Pass 1: Parse and record conversation turns into Transcript
+        # Pass 1: Parse and record conversation turns into Transcript (filtering out repetitive idle messages)
         for turn in contents:
             role = str(turn.get("role", "unknown")).lower()
             raw_content = (turn.get("content") or turn.get("text") or turn.get("message") or "").strip()
             speech_ms = turn.get("speech_start_ms") or turn.get("speech_ms") or turn.get("start_ms")
 
             if not raw_content:
+                continue
+
+            # Task 4: Suppress repetitive idle messages from assistant
+            if role in ["assistant", "bot", "ai"] and is_idle_status_message(raw_content):
                 continue
 
             if speech_ms and speech_ms > 0:
@@ -891,7 +1047,8 @@ class AgoraConvoAIManager:
                     "timestamp_sec": ts_sec,
                 })
 
-        # Pass 2: Extract structured intelligence from Assistant tags (Primary)
+        # Pass 2: Extract structured intelligence from Assistant tags in strict priority order:
+        # CONFLICT > DECISION > ACTION > HYPOTHESIS > FACT
         for turn in contents:
             role = str(turn.get("role", "unknown")).lower()
             text = (turn.get("content") or turn.get("text") or turn.get("message") or "").strip()
@@ -905,38 +1062,26 @@ class AgoraConvoAIManager:
             if not text or role not in ["assistant", "bot", "ai"]:
                 continue
 
-            # 1. FACTS: [FACT: ...]
-            for fact_text in re.findall(r"\[FACT:\s*([^\]]+)\]", text, re.IGNORECASE):
-                clean = re.sub(r"\s+", " ", fact_text).strip()
-                if is_valid_intel_text(clean) and not is_similar_to_existing(clean, seen_facts):
-                    seen_facts.add(clean.lower())
-                    fact_id = f"fact-{len(existing_facts)+1}"
-                    existing_facts.append({
-                        "id": fact_id,
+            # 1. CONFLICTS: [CONFLICT: ...] (Priority 1)
+            for conf_text in re.findall(r"\[CONFLICT:\s*([^\]]+)\]", text, re.IGNORECASE):
+                clean = re.sub(r"\s+", " ", conf_text).strip()
+                if is_valid_intel_text(clean) and not is_similar_to_existing(clean, seen_conflicts):
+                    seen_conflicts.add(clean.lower())
+                    conf_id = f"conf-{len(existing_conflicts)+1}"
+                    existing_conflicts.append({
+                        "id": conf_id,
                         "text": clean,
                         "timestamp": ts_sec,
+                        "severity": "High",
                         "speaker": role,
                     })
-                    add_timeline_evt("fact", clean, ts_sec, item_id=fact_id)
+                    add_timeline_evt("conflict", clean, ts_sec, item_id=conf_id)
+                    logger.info(f"[INTELLIGENCE EXTRACT] Logged CONFLICT: '{clean}'")
 
-            # 2. HYPOTHESES: [HYPOTHESIS: ...]
-            for hypo_text in re.findall(r"\[HYPOTHESIS:\s*([^\]]+)\]", text, re.IGNORECASE):
-                clean = re.sub(r"\s+", " ", hypo_text).strip()
-                if is_valid_intel_text(clean) and not is_similar_to_existing(clean, seen_hypotheses):
-                    seen_hypotheses.add(clean.lower())
-                    hypo_id = f"hypo-{len(existing_hypotheses)+1}"
-                    existing_hypotheses.append({
-                        "id": hypo_id,
-                        "text": clean,
-                        "timestamp": ts_sec,
-                        "speaker": role,
-                    })
-                    add_timeline_evt("hypothesis", clean, ts_sec, item_id=hypo_id)
-
-            # 3. DECISIONS: [DECISION: ...]
+            # 2. DECISIONS: [DECISION: ...] (Priority 2 - Must not duplicate conflicts)
             for dec_text in re.findall(r"\[DECISION:\s*([^\]]+)\]", text, re.IGNORECASE):
                 clean = re.sub(r"\s+", " ", dec_text).strip()
-                if is_valid_intel_text(clean) and not is_similar_to_existing(clean, seen_decisions):
+                if is_valid_intel_text(clean) and not is_similar_to_any(clean, seen_conflicts, seen_decisions):
                     seen_decisions.add(clean.lower())
                     dec_id = f"dec-{len(existing_decisions)+1}"
                     existing_decisions.append({
@@ -947,8 +1092,9 @@ class AgoraConvoAIManager:
                         "speaker": role,
                     })
                     add_timeline_evt("decision", clean, ts_sec, status="Confirmed", item_id=dec_id)
+                    logger.info(f"[INTELLIGENCE EXTRACT] Logged DECISION: '{clean}'")
 
-            # 4. ACTIONS: [ACTION: ...]
+            # 3. ACTIONS: [ACTION: ...] (Priority 3 - Must not duplicate conflicts/decisions)
             for act_text in re.findall(r"\[ACTION:\s*([^\]]+)\]", text, re.IGNORECASE):
                 clean = re.sub(r"\s+", " ", act_text).strip()
                 if not is_valid_intel_text(clean):
@@ -972,7 +1118,7 @@ class AgoraConvoAIManager:
                     action_desc = parts[1].strip()
 
                 action_desc = re.sub(r"\s+", " ", action_desc).strip()
-                if is_valid_intel_text(action_desc) and not is_similar_to_existing(action_desc, seen_actions):
+                if is_valid_intel_text(action_desc) and not is_similar_to_any(action_desc, seen_conflicts, seen_decisions, seen_actions):
                     seen_actions.add(action_desc.lower())
                     act_id = f"act-{len(existing_actions)+1}"
                     existing_actions.append({
@@ -984,23 +1130,40 @@ class AgoraConvoAIManager:
                         "speaker": role,
                     })
                     add_timeline_evt("action", action_desc, ts_sec, owner=owner, status="Pending", item_id=act_id)
+                    logger.info(f"[INTELLIGENCE EXTRACT] Logged ACTION: '@{owner} - {action_desc}'")
 
-            # 5. CONFLICTS: [CONFLICT: ...]
-            for conf_text in re.findall(r"\[CONFLICT:\s*([^\]]+)\]", text, re.IGNORECASE):
-                clean = re.sub(r"\s+", " ", conf_text).strip()
-                if is_valid_intel_text(clean) and not is_similar_to_existing(clean, seen_conflicts):
-                    seen_conflicts.add(clean.lower())
-                    conf_id = f"conf-{len(existing_conflicts)+1}"
-                    existing_conflicts.append({
-                        "id": conf_id,
+            # 4. HYPOTHESES: [HYPOTHESIS: ...] (Priority 4 - Must not duplicate higher priority)
+            for hypo_text in re.findall(r"\[HYPOTHESIS:\s*([^\]]+)\]", text, re.IGNORECASE):
+                clean = re.sub(r"\s+", " ", hypo_text).strip()
+                if is_valid_intel_text(clean) and not is_similar_to_any(clean, seen_conflicts, seen_decisions, seen_actions, seen_hypotheses):
+                    seen_hypotheses.add(clean.lower())
+                    hypo_id = f"hypo-{len(existing_hypotheses)+1}"
+                    existing_hypotheses.append({
+                        "id": hypo_id,
                         "text": clean,
                         "timestamp": ts_sec,
-                        "severity": "High",
                         "speaker": role,
                     })
-                    add_timeline_evt("conflict", clean, ts_sec, item_id=conf_id)
+                    add_timeline_evt("hypothesis", clean, ts_sec, item_id=hypo_id)
+                    logger.info(f"[INTELLIGENCE EXTRACT] Logged HYPOTHESIS: '{clean}'")
+
+            # 5. FACTS: [FACT: ...] (Priority 5 - Lowest priority, strictly non-duplicate)
+            for fact_text in re.findall(r"\[FACT:\s*([^\]]+)\]", text, re.IGNORECASE):
+                clean = re.sub(r"\s+", " ", fact_text).strip()
+                if is_valid_intel_text(clean) and not is_similar_to_any(clean, seen_conflicts, seen_decisions, seen_actions, seen_hypotheses, seen_facts):
+                    seen_facts.add(clean.lower())
+                    fact_id = f"fact-{len(existing_facts)+1}"
+                    existing_facts.append({
+                        "id": fact_id,
+                        "text": clean,
+                        "timestamp": ts_sec,
+                        "speaker": role,
+                    })
+                    add_timeline_evt("fact", clean, ts_sec, item_id=fact_id)
+                    logger.info(f"[INTELLIGENCE EXTRACT] Logged FACT: '{clean}'")
 
         # Pass 3: Extract structured intelligence from direct User speech (Secondary fallback)
+        # Process in strict priority order: CONFLICT > DECISION > ACTION > HYPOTHESIS > FACT
         for turn in contents:
             role = str(turn.get("role", "unknown")).lower()
             text = (turn.get("content") or turn.get("text") or turn.get("message") or "").strip()
@@ -1020,42 +1183,42 @@ class AgoraConvoAIManager:
 
             user_lower = clean_user.lower()
 
-            # Direct Action pattern: e.g. "SRE, drain the affected pods" or "@SRE, restart service"
-            action_patterns = [
-                r"^(?:@)?(SRE|DevOps|DBA|Backend|Frontend|Infra|Security|Lead|Team)[,\s:]+(.+)$",
-                r"^(?:please\s+)?(?:have\s+)?(SRE|DevOps|DBA|Backend|Infra)\s+(.+)$",
+            # Priority 1: Direct Conflict in user speech
+            # e.g. "The DBA reports connection timeouts but the monitoring dashboard shows normal database latency."
+            conflict_patterns = [
+                r"^(.+)\s+(?:reports?\s+.+\s+)?(?:but|whereas|however)\s+(?:the\s+)?(?:monitoring|dashboard|metrics|team|logs)\s+(.+)$",
+                r"^(?:there\s+is\s+a\s+)?(?:conflict|discrepancy|inconsistency|mismatch)\s+(?:between|with|in)\s+(.+)$",
+                r"^(.+)\s+reports?\s+(.+)\s+but\s+(.+)$",
             ]
-            matched = False
-            for pat in action_patterns:
+            conflict_matched = False
+            for pat in conflict_patterns:
                 m = re.match(pat, clean_user, re.IGNORECASE)
-                if m:
-                    owner = m.group(1).strip()
-                    task = m.group(2).strip()
-                    task_clean = re.sub(r"\s+", " ", task).rstrip(".").strip()
-                    if is_valid_intel_text(task_clean) and not is_similar_to_existing(task_clean, seen_actions):
-                        seen_actions.add(task_clean.lower())
-                        act_id = f"act-{len(existing_actions)+1}"
-                        existing_actions.append({
-                            "id": act_id,
-                            "text": task_clean,
-                            "owner": owner.upper(),
-                            "status": "Pending",
+                if m or ("reports" in user_lower and "but" in user_lower) or ("discrepancy" in user_lower) or ("inconsistent" in user_lower):
+                    conf_clean = clean_user.rstrip(".").strip()
+                    if is_valid_intel_text(conf_clean) and not is_similar_to_existing(conf_clean, seen_conflicts):
+                        seen_conflicts.add(conf_clean.lower())
+                        conf_id = f"conf-{len(existing_conflicts)+1}"
+                        existing_conflicts.append({
+                            "id": conf_id,
+                            "text": conf_clean,
                             "timestamp": ts_sec,
+                            "severity": "High",
                             "speaker": role,
                         })
-                        add_timeline_evt("action", task_clean, ts_sec, owner=owner.upper(), status="Pending", item_id=act_id)
-                        logger.info(f"[INTELLIGENCE DIRECT USER ACTION] Extracted ACTION from user turn: '@{owner.upper()} - {task_clean}'")
-                    matched = True
+                        add_timeline_evt("conflict", conf_clean, ts_sec, item_id=conf_id)
+                        logger.info(f"[INTELLIGENCE DIRECT USER CONFLICT] Extracted CONFLICT from user turn: '{conf_clean}'")
+                    conflict_matched = True
                     break
 
-            if matched:
+            if conflict_matched:
                 continue
 
-            # Direct Decision pattern: e.g. "Let's freeze the production deployment"
+            # Priority 2: Direct Decision in user speech
             decision_patterns = [
                 r"^let(?:'s|\s+us)\s+(freeze|rollback|halt|stop|switch|reroute|scale|deploy|disable|lock|postpone|abort)\s+(.+)$",
                 r"^(?:we\s+decided\s+to|decision\s*:\s*)(.+)$",
             ]
+            dec_matched = False
             for pat in decision_patterns:
                 m = re.match(pat, clean_user, re.IGNORECASE)
                 if m:
@@ -1068,7 +1231,7 @@ class AgoraConvoAIManager:
                         dec_text = m.group(1).strip()
 
                     dec_clean = re.sub(r"\s+", " ", dec_text).rstrip(".").strip()
-                    if is_valid_intel_text(dec_clean) and not is_similar_to_existing(dec_clean, seen_decisions):
+                    if is_valid_intel_text(dec_clean) and not is_similar_to_any(dec_clean, seen_conflicts, seen_decisions):
                         seen_decisions.add(dec_clean.lower())
                         dec_id = f"dec-{len(existing_decisions)+1}"
                         existing_decisions.append({
@@ -1080,16 +1243,47 @@ class AgoraConvoAIManager:
                         })
                         add_timeline_evt("decision", dec_clean, ts_sec, status="Confirmed", item_id=dec_id)
                         logger.info(f"[INTELLIGENCE DIRECT USER DECISION] Extracted DECISION from user turn: '{dec_clean}'")
-                    matched = True
+                    dec_matched = True
                     break
 
-            if matched:
+            if dec_matched:
                 continue
 
-            # Direct Hypothesis pattern: e.g. "Could this be caused by a memory leak...?" or "I think the recent deployment may be responsible"
+            # Priority 3: Direct Action in user speech
+            action_patterns = [
+                r"^(?:@)?(SRE|DevOps|DBA|Backend|Frontend|Infra|Security|Lead|Team)[,\s:]+(.+)$",
+                r"^(?:please\s+)?(?:have\s+)?(SRE|DevOps|DBA|Backend|Infra)\s+(.+)$",
+            ]
+            act_matched = False
+            for pat in action_patterns:
+                m = re.match(pat, clean_user, re.IGNORECASE)
+                if m:
+                    owner = m.group(1).strip()
+                    task = m.group(2).strip()
+                    task_clean = re.sub(r"\s+", " ", task).rstrip(".").strip()
+                    if is_valid_intel_text(task_clean) and not is_similar_to_any(task_clean, seen_conflicts, seen_decisions, seen_actions):
+                        seen_actions.add(task_clean.lower())
+                        act_id = f"act-{len(existing_actions)+1}"
+                        existing_actions.append({
+                            "id": act_id,
+                            "text": task_clean,
+                            "owner": owner.upper(),
+                            "status": "Pending",
+                            "timestamp": ts_sec,
+                            "speaker": role,
+                        })
+                        add_timeline_evt("action", task_clean, ts_sec, owner=owner.upper(), status="Pending", item_id=act_id)
+                        logger.info(f"[INTELLIGENCE DIRECT USER ACTION] Extracted ACTION from user turn: '@{owner.upper()} - {task_clean}'")
+                    act_matched = True
+                    break
+
+            if act_matched:
+                continue
+
+            # Priority 4: Direct Hypothesis in user speech
             if user_lower.startswith(("could this be caused by", "is it possible that", "i suspect that", "i think", "we think", "maybe the", "might be a", "perhaps")) or "may be responsible" in user_lower or "might be responsible" in user_lower or "could be responsible" in user_lower:
                 hypo_clean = clean_user.rstrip("?").strip()
-                if is_valid_intel_text(hypo_clean) and not is_similar_to_existing(hypo_clean, seen_hypotheses):
+                if is_valid_intel_text(hypo_clean) and not is_similar_to_any(hypo_clean, seen_conflicts, seen_decisions, seen_actions, seen_hypotheses):
                     seen_hypotheses.add(hypo_clean.lower())
                     hypo_id = f"hypo-{len(existing_hypotheses)+1}"
                     existing_hypotheses.append({
@@ -1100,11 +1294,12 @@ class AgoraConvoAIManager:
                     })
                     add_timeline_evt("hypothesis", hypo_clean, ts_sec, item_id=hypo_id)
                     logger.info(f"[INTELLIGENCE DIRECT USER HYPOTHESIS] Extracted HYPOTHESIS from user turn: '{hypo_clean}'")
+                continue
 
-            # Direct Fact pattern: e.g. "Database connection pool is exhausted on us-west-2" or "The payment database is down"
-            elif any(kw in user_lower for kw in ["is exhausted", "error rate is", "spiked to", "latency is", "down in", "500 errors on", "out of memory", "is down", "database is down", "payment database is down", "database down", "outage on", "crashed", "failed", "unreachable", "service down", "api down", "database"]):
+            # Priority 5: Direct Fact in user speech (Strictly non-duplicate with any higher priority category)
+            if any(kw in user_lower for kw in ["is exhausted", "error rate is", "spiked to", "latency is", "down in", "500 errors on", "out of memory", "is down", "database is down", "payment database is down", "database down", "outage on", "crashed", "failed", "unreachable", "service down", "api down", "database"]):
                 fact_clean = clean_user.rstrip(".").strip()
-                if is_valid_intel_text(fact_clean) and not is_similar_to_existing(fact_clean, seen_facts):
+                if is_valid_intel_text(fact_clean) and not is_similar_to_any(fact_clean, seen_conflicts, seen_decisions, seen_actions, seen_hypotheses, seen_facts):
                     seen_facts.add(fact_clean.lower())
                     fact_id = f"fact-{len(existing_facts)+1}"
                     existing_facts.append({
@@ -1116,9 +1311,11 @@ class AgoraConvoAIManager:
                     add_timeline_evt("fact", fact_clean, ts_sec, item_id=fact_id)
                     logger.info(f"[INTELLIGENCE DIRECT USER FACT] Extracted FACT from user turn: '{fact_clean}'")
 
+        # Run final reconciliation pass
+        self._reconcile_incident_items(incident)
         self._save_persisted_incidents()
-        logger.info(f"[INTELLIGENCE SUMMARY] Facts={len(existing_facts)} Hypotheses={len(existing_hypotheses)} Decisions={len(existing_decisions)} Actions={len(existing_actions)} Conflicts={len(existing_conflicts)}")
-        logger.info(f"[INTELLIGENCE TIMELINE] Total timeline events={len(existing_timeline)}")
+        logger.info(f"[INTELLIGENCE SUMMARY] Facts={len(incident.get('facts', []))} Hypotheses={len(incident.get('hypotheses', []))} Decisions={len(incident.get('decisions', []))} Actions={len(incident.get('actions', []))} Conflicts={len(incident.get('conflicts', []))}")
+        logger.info(f"[INTELLIGENCE TIMELINE] Total timeline events={len(incident.get('timeline', []))}")
 
     def update_action_status(self, identifier: Optional[str], action_id: str, status: str = "Completed") -> Dict[str, Any]:
         """

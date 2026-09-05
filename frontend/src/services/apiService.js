@@ -4,7 +4,8 @@
  * Supports Multi-Person Incident Rooms, shared intelligence, participant presence, and transcripts.
  */
 
-const API_BASE = "http://localhost:8000";
+const API_BASE =
+  import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
 class ApiService {
   async getHealth() {

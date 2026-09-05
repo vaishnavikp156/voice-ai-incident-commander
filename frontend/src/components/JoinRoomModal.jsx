@@ -1,11 +1,11 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Users, X, ArrowRight, Shield, User, KeyRound } from "lucide-react";
 
 export function JoinRoomModal({
   isOpen,
   onClose,
   onJoin,
-  initialDisplayName = "Engineer",
+  initialDisplayName = "Responder",
   initialRole = "Incident Responder",
 }) {
   const [roomCode, setRoomCode] = useState("");
@@ -13,6 +13,27 @@ export function JoinRoomModal({
   const [role, setRole] = useState(initialRole);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
+
+  // Sync state when modal is opened
+  useEffect(() => {
+    if (isOpen) {
+      setDisplayName(initialDisplayName || "");
+      setRole(initialRole || "Incident Responder");
+      setError(null);
+    }
+  }, [isOpen, initialDisplayName, initialRole]);
+
+  // Handle Escape key to close modal
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape") {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isOpen, onClose]);
 
   if (!isOpen) return null;
 
@@ -45,8 +66,8 @@ export function JoinRoomModal({
   };
 
   return (
-    <div className="modal-backdrop">
-      <div className="modal-content join-modal-box">
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-content join-modal-box" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <div className="header-title-group">
             <div className="modal-icon-wrap">
@@ -57,7 +78,7 @@ export function JoinRoomModal({
               <p className="modal-subtitle">Connect to an active multi-person technical outage bridge</p>
             </div>
           </div>
-          <button type="button" className="btn-close" onClick={onClose}>
+          <button type="button" className="btn-close" onClick={onClose} aria-label="Close modal">
             <X size={16} />
           </button>
         </div>

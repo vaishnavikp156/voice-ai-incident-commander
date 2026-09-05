@@ -26,6 +26,7 @@ export function IncidentIntelligence({
   isAgentActive = false,
   currentDisplayName = "You",
   onUpdateActionStatus,
+  onCreateJiraFromAction,
 }) {
   const {
     incident_id = "INC-2048",
@@ -293,24 +294,36 @@ export function IncidentIntelligence({
                         <div className="intel-meta">
                           <Clock size={11} /> {act.timestamp}
                         </div>
-                        <button
-                          type="button"
-                          className={`btn-action-complete ${
-                            isCompleted ? "btn-act-reopen" : "btn-act-complete"
-                          }`}
-                          onClick={() => handleToggleActionComplete(act)}
-                          disabled={isUpdating}
-                          title={isCompleted ? "Re-open action" : "Mark action as completed"}
-                        >
-                          <CheckSquare size={12} />
-                          <span>
-                            {isUpdating
-                              ? "Updating..."
-                              : isCompleted
-                              ? "Completed ✓"
-                              : "Mark Complete"}
-                          </span>
-                        </button>
+                        <div className="act-btn-group">
+                          {onCreateJiraFromAction && (
+                            <button
+                              type="button"
+                              className="btn-action-jira"
+                              onClick={() => onCreateJiraFromAction(act.text)}
+                              title="Export action item to Jira"
+                            >
+                              Jira
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className={`btn-action-complete ${
+                              isCompleted ? "btn-act-reopen" : "btn-act-complete"
+                            }`}
+                            onClick={() => handleToggleActionComplete(act)}
+                            disabled={isUpdating}
+                            title={isCompleted ? "Re-open action" : "Mark action as completed"}
+                          >
+                            <CheckSquare size={12} />
+                            <span>
+                              {isUpdating
+                                ? "Updating..."
+                                : isCompleted
+                                ? "Completed ✓"
+                                : "Mark Complete"}
+                            </span>
+                          </button>
+                        </div>
                       </div>
                     </li>
                   );

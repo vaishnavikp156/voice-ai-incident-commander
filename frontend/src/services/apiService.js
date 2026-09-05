@@ -189,6 +189,70 @@ class ApiService {
 
     return await res.json();
   }
+
+  // Integrations & Telemetry APIs
+  async getIntegrationsStatus() {
+    try {
+      const res = await fetch(`${API_BASE}/api/integrations/status`);
+      if (!res.ok) throw new Error("Failed to fetch integrations status");
+      return await res.json();
+    } catch (err) {
+      console.warn("[ApiService] Error fetching integrations status:", err);
+      return {
+        jira: { status: "Not configured", is_configured: false },
+        slack: { status: "Not configured", is_configured: false },
+        pagerduty: { status: "Not configured", is_configured: false },
+        monitoring: { status: "Demo", is_configured: false, mode: "DEMO" },
+      };
+    }
+  }
+
+  async createJiraIssue(payload) {
+    const res = await fetch(`${API_BASE}/api/integrations/jira/issue`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  }
+
+  async broadcastSlack(payload) {
+    const res = await fetch(`${API_BASE}/api/integrations/slack/broadcast`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  }
+
+  async triggerPagerDuty(payload) {
+    const res = await fetch(`${API_BASE}/api/integrations/pagerduty/trigger`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  }
+
+  async getMonitoringMetrics() {
+    try {
+      const res = await fetch(`${API_BASE}/api/integrations/monitoring/metrics`);
+      if (!res.ok) throw new Error("Failed to fetch monitoring metrics");
+      return await res.json();
+    } catch (err) {
+      console.warn("[ApiService] Error fetching monitoring metrics:", err);
+      return { is_simulated: true, mode: "DEMO", system_signals: [] };
+    }
+  }
+
+  async correlateMonitoringMetric(payload) {
+    const res = await fetch(`${API_BASE}/api/integrations/monitoring/correlate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  }
 }
 
 export const apiService = new ApiService();

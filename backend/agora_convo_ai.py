@@ -47,7 +47,7 @@ STRICT RULES:
 4. NEVER use generic placeholder words like "confirmed technical fact", "theory or assumption", "agreed decision", "task description", or "contradictory statements".
 5. NEVER invent or hallucinate facts that the team did not mention.
 6. If no fact/hypothesis/decision/action/conflict was mentioned in the current turn, do NOT output that tag.
-7. Do NOT generate repeated unprompted idle messages such as "No updates received. Monitoring for any incoming information." Only speak when acknowledging participants or when an incident update occurs.
+7. When joining, provide ONE short initial greeting ("Echo Incident Commander online. Listening to channel."). After that, remain completely silent and listening while waiting for human input. Do NOT repeatedly speak unprompted waiting messages (such as "I'm here and ready to assist", "Ready to receive updates", "I'm waiting for input", or "Please share when ready"). Only speak when a human participant provides incident information, asks a question, or requests a status briefing.
 
 EXAMPLES OF REALISTIC OUTPUT:
 - User says: "The payment database is down."
@@ -87,18 +87,27 @@ PLACEHOLDER_BLACKLIST = {
     "exact contradictory claims or discrepancy between reports/metrics",
 }
 
-# Idle / status messages from assistant that should not clutter Spoken Conversation
+# Idle / repetitive waiting messages from assistant that should not clutter Spoken Conversation
 IDLE_STATUS_PATTERNS = [
     r"^no\s+updates\s+received",
     r"^continuing\s+to\s+monitor",
     r"^monitoring\s+for\s+(?:any\s+)?(?:incoming\s+)?(?:information|updates)",
     r"^monitoring\s+the\s+channel",
     r"^standby\s+for\s+(?:any\s+)?(?:information|updates)",
-    r"^standing\s+by\s+for\s+(?:any\s+)?updates",
+    r"^standing\s+by\s+for\s+(?:any\s+)?(?:updates|information|input)",
     r"^standing\s+by\b",
     r"^no\s+new\s+information\s+reported",
-    r"^awaiting\s+(?:any\s+)?updates",
-    r"^listening\s+for\s+updates",
+    r"^awaiting\s+(?:any\s+)?(?:updates|information|input)",
+    r"^listening\s+for\s+(?:any\s+)?(?:updates|information|input)",
+    r"^(?:im|i\s+am)\s+here\s+and\s+ready\s+to\s+(?:assist|help)",
+    r"^(?:im|i\s+am)\s+here\s+to\s+(?:help|assist)",
+    r"^(?:im|i\s+am)\s+(?:waiting|ready)\s+for\s+(?:your\s+)?(?:input|updates|information)",
+    r"^ready\s+to\s+receive\s+(?:your\s+)?(?:updates|information|input)",
+    r"^ready\s+whenever\s+you\s+are",
+    r"^please\s+share\s+when\s+ready",
+    r"^feel\s+free\s+to\s+share\b",
+    r"^waiting\s+for\s+(?:your\s+)?(?:input|updates|information)",
+    r"^how\s+can\s+i\s+assist\s+with\s+the\s+incident",
 ]
 
 
@@ -171,6 +180,179 @@ def is_similar_to_any(new_text: str, *text_sets: set) -> bool:
         if is_similar_to_existing(new_text, text_set):
             return True
     return False
+
+
+def compute_incident_synthesis(incident: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Synthesize missing information, recommended next steps, uncertainty-aware summary,
+    and unresolved risks based on the current incident state.
+    """
+    facts = incident.get("facts", [])
+    hypotheses = incident.get("hypotheses", [])
+    decisions = incident.get("decisions", [])
+    actions = incident.get("actions", [])
+    conflicts = incident.get("conflicts", [])
+    transcript = incident.get("transcript", [])
+
+    all_text = " ".join([
+        " ".join([f.get("text", "") for f in facts]),
+        " ".join([h.get("text", "") for h in hypotheses]),
+        " ".join([d.get("text", "") for d in decisions]),
+        " ".join([a.get("text", "") for a in actions]),
+        " ".join([c.get("text", "") for c in conflicts]),
+        " ".join([t.get("content", "") for t in transcript]),
+    ]).lower()
+
+    # 1. MISSING INFORMATION DETECTION
+    missing_info = []
+
+    # Check for Impact / Scope
+    has_scope = any(k in all_text for k in [
+        "users affected", "blast radius", "percentage", "%", "all regions",
+        "us-east", "us-west", "eu-west", "region", "scope", "customer impact", "customers affected"
+    ])
+    if not has_scope and len(facts) > 0:
+        missing_info.append({
+            "id": "mi-scope",
+            "category": "Scope",
+            "text": "Impact scope and customer blast radius have not been confirmed.",
+            "severity": "High",
+        })
+
+    # Check for unassigned actions
+    unassigned_actions = [
+        a for a in actions
+        if a.get("owner", "").lower() in ["unassigned", "unknown", ""] and a.get("status") != "Completed"
+    ]
+    if unassigned_actions:
+        missing_info.append({
+            "id": "mi-owner",
+            "category": "Ownership",
+            "text": f"Owner missing for {len(unassigned_actions)} pending action item(s) ('{unassigned_actions[0].get('text', '')[:40]}...').",
+            "severity": "Medium",
+        })
+
+    # Check for unverified hypotheses lacking telemetry evidence
+    if hypotheses and not any(k in all_text for k in ["telemetry confirmed", "logs verify", "metrics confirm", "proven that", "verified that"]):
+        missing_info.append({
+            "id": "mi-evidence",
+            "category": "Evidence",
+            "text": f"Empirical telemetry evidence is missing for active hypothesis: '{hypotheses[0].get('text', '')}'.",
+            "severity": "High",
+        })
+
+    # Check for unverified conflicts
+    if conflicts:
+        missing_info.append({
+            "id": "mi-conflict",
+            "category": "Reconciliation",
+            "text": f"Conflicting signals require verification: '{conflicts[0].get('text', '')}'.",
+            "severity": "High",
+        })
+
+    # If nothing has been spoken yet
+    if not facts and not hypotheses and not decisions and not actions:
+        missing_info.append({
+            "id": "mi-init",
+            "category": "Triage",
+            "text": "Initial incident briefing and system telemetry signals are pending.",
+            "severity": "Low",
+        })
+
+    # 2. NEXT-STEP RECOMMENDATIONS
+    recommendations = []
+
+    if conflicts:
+        recommendations.append({
+            "id": "rec-conf",
+            "priority": "P1",
+            "category": "Validation",
+            "text": "Reconcile contradictory telemetry between monitoring metrics and engineer reports.",
+            "suggested_role": "Incident Commander / DBA",
+        })
+
+    if unassigned_actions:
+        recommendations.append({
+            "id": "rec-owner",
+            "priority": "P1",
+            "category": "Coordination",
+            "text": "Assign a designated owner (e.g. SRE, DevOps, DBA) to pending remediation actions.",
+            "suggested_role": "Incident Commander",
+        })
+
+    if not has_scope and len(facts) > 0:
+        recommendations.append({
+            "id": "rec-scope",
+            "priority": "P2",
+            "category": "Assessment",
+            "text": "Assess and document user impact percentage and affected geographical regions.",
+            "suggested_role": "Communications Lead",
+        })
+
+    if hypotheses and not decisions:
+        recommendations.append({
+            "id": "rec-hypo",
+            "priority": "P2",
+            "category": "Investigation",
+            "text": "Inspect recent deployment history (commits/releases) and compare connection saturation metrics.",
+            "suggested_role": "DevOps / SRE Lead",
+        })
+
+    if not decisions and facts:
+        recommendations.append({
+            "id": "rec-mitigate",
+            "priority": "P2",
+            "category": "Mitigation",
+            "text": "Formulate and lock an agreed mitigation decision (e.g., deployment freeze, replica scaling, traffic failover).",
+            "suggested_role": "Incident Commander",
+        })
+
+    if not recommendations:
+        recommendations.append({
+            "id": "rec-default",
+            "priority": "P3",
+            "category": "Coordination",
+            "text": "Continue monitoring service health and document incoming responder observations.",
+            "suggested_role": "All Responders",
+        })
+
+    # 3. INCIDENT SUMMARY & UNRESOLVED RISKS (Uncertainty-Aware)
+    summary_text = ""
+    unresolved_risks = []
+
+    if facts:
+        fact_summary = "; ".join([f.get("text", "").rstrip(".") for f in facts[:2]])
+        summary_text = f"Confirmed status: {fact_summary}."
+        if hypotheses:
+            hypo_summary = hypotheses[0].get("text", "").rstrip(".")
+            summary_text += f" Under active investigation: {hypo_summary} (unconfirmed hypothesis)."
+            unresolved_risks.append("Root cause remains unconfirmed by definitive telemetry.")
+        else:
+            unresolved_risks.append("Root cause has not yet been established.")
+    elif hypotheses:
+        hypo_summary = hypotheses[0].get("text", "").rstrip(".")
+        summary_text = f"Active hypothesis: {hypo_summary}. Direct observation or fact confirmation is pending."
+        unresolved_risks.append("Operating without confirmed baseline facts.")
+    else:
+        summary_text = "Incident triage in progress. Awaiting initial technical facts and telemetry briefings."
+        unresolved_risks.append("Incident severity and system scope are undetermined.")
+
+    if not has_scope and len(facts) > 0:
+        unresolved_risks.append("Total customer impact scope and blast radius have not yet been established.")
+
+    if conflicts:
+        unresolved_risks.append("Discrepancies in diagnostic signals may lead to misdirected mitigation actions.")
+
+    pending_actions_count = len([a for a in actions if a.get("status") != "Completed"])
+    if pending_actions_count > 0:
+        unresolved_risks.append(f"{pending_actions_count} remediation task(s) currently pending completion.")
+
+    return {
+        "missing_information": missing_info,
+        "recommendations": recommendations,
+        "current_understanding": summary_text,
+        "unresolved_risks": unresolved_risks,
+    }
 
 
 class AgoraConvoAIManager:
@@ -527,6 +709,9 @@ class AgoraConvoAIManager:
         else:
             agent_status = saved_status
 
+        # Compute dynamic intelligence synthesis
+        synthesis = compute_incident_synthesis(incident)
+
         return {
             "incident_id": incident.get("incident_id"),
             "room_code": incident.get("room_code", incident.get("incident_id", "").replace("INC-", "")),
@@ -545,6 +730,10 @@ class AgoraConvoAIManager:
             "total_items": total,
             "dialogue_turns_count": len(transcript),
             "agent_id": target_agent_id if agent_status in ["RUNNING", "JOINING"] else None,
+            "missing_information": synthesis.get("missing_information", []),
+            "recommendations": synthesis.get("recommendations", []),
+            "current_understanding": synthesis.get("current_understanding", ""),
+            "unresolved_risks": synthesis.get("unresolved_risks", []),
             "last_updated": incident.get("last_updated", time.time()),
         }
 
@@ -1008,6 +1197,10 @@ class AgoraConvoAIManager:
             f"{t.get('role')}:{re.sub(r'\s+', ' ', t.get('content', '')).strip().lower()}"
             for t in existing_transcript
         }
+        has_greeting = any(
+            t.get("role") in ["assistant", "bot", "ai"] and "incident commander online" in (t.get("content", "") + " " + t.get("raw_content", "")).lower()
+            for t in existing_transcript
+        )
 
         # Pass 1: Parse and record conversation turns into Transcript (filtering out repetitive idle messages)
         for turn in contents:
@@ -1018,9 +1211,15 @@ class AgoraConvoAIManager:
             if not raw_content:
                 continue
 
-            # Task 4: Suppress repetitive idle messages from assistant
-            if role in ["assistant", "bot", "ai"] and is_idle_status_message(raw_content):
-                continue
+            # Task 4 & UX: Suppress repetitive idle messages from assistant
+            if role in ["assistant", "bot", "ai"]:
+                if is_idle_status_message(raw_content):
+                    continue
+                is_greeting = "incident commander online" in raw_content.lower()
+                if is_greeting:
+                    if has_greeting:
+                        continue
+                    has_greeting = True
 
             if speech_ms and speech_ms > 0:
                 ts_formatted = datetime.fromtimestamp(speech_ms / 1000.0).strftime("%H:%M")

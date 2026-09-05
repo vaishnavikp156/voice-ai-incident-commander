@@ -7,7 +7,9 @@ Version 1.1.0
 
 import logging
 import os
-from typing import Any, Dict, Optional
+import time
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +17,12 @@ from pydantic import BaseModel
 
 from agora_convo_ai import agora_convo_ai_manager
 from agora_token import AgoraTokenBuilder
+from integrations import (
+    jira_service,
+    slack_service,
+    pagerduty_service,
+    monitoring_service,
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -112,6 +120,34 @@ class SettingsRequest(BaseModel):
     agora_channel_name: Optional[str] = None
 
 
+class JiraIssueCreateRequest(BaseModel):
+    summary: str
+    description: Optional[str] = ""
+    issue_type: Optional[str] = "Task"
+    priority: Optional[str] = "High"
+    labels: Optional[List[str]] = None
+    incident_id: Optional[str] = None
+
+
+class SlackBroadcastRequest(BaseModel):
+    incident_id: Optional[str] = None
+    room_code: Optional[str] = None
+    custom_note: Optional[str] = None
+
+
+class PagerDutyTriggerRequest(BaseModel):
+    incident_id: Optional[str] = None
+    summary: str
+    severity: Optional[str] = "critical"
+
+
+class MonitoringCorrelateRequest(BaseModel):
+    incident_id: Optional[str] = None
+    metric_name: str
+    metric_value: str
+    source: Optional[str] = "Telemetry APM"
+
+
 @app.get("/")
 def root():
     active_inc = agora_convo_ai_manager.get_incident()
@@ -146,6 +182,106 @@ def health_check():
         "customer_id_set": bool(customer_id),
         "customer_secret_set": bool(customer_secret),
     }
+
+
+@app.get("/api/integrations/status")
+def get_integrations_status():
+    """Get connection and configuration status across Jira, Slack, PagerDuty, and Monitoring."""
+    return {
+        "jira": jira_service.get_status(),
+        "slack": slack_service.get_status(),
+        "pagerduty": pagerduty_service.get_status(),
+        "monitoring": monitoring_service.get_status(),
+    }
+
+
+@app.post("/api/integrations/jira/issue")
+async def create_jira_issue(req: JiraIssueCreateRequest):
+    """Create an issue in Jira Cloud from an incident action item or summary."""
+    return await jira_service.create_issue(
+        summary=req.summary,
+        description=req.description or req.summary,
+        issue_type=req.issue_type or "Task",
+        priority=req.priority or "High",
+        labels=req.labels,
+        incident_id=req.incident_id,
+    )
+
+
+@app.post("/api/integrations/slack/broadcast")
+async def broadcast_slack_update(req: SlackBroadcastRequest):
+    """Broadcast current incident situation update to configured Slack channel."""
+    incident = agora_convo_ai_manager.get_incident(req.incident_id or req.room_code)
+    snapshot = agora_convo_ai_manager.get_incident_record_snapshot(incident.get("incident_id"))
+
+    key_facts = [f.get("text", "") for f in snapshot.get("facts", [])]
+    active_actions = snapshot.get("actions", [])
+    conflicts = [c.get("text", "") for c in snapshot.get("conflicts", [])]
+    unresolved_risks = snapshot.get("unresolved_risks", [])
+
+    summary = req.custom_note or snapshot.get("current_understanding") or "Active incident triage in progress."
+
+    return await slack_service.broadcast_incident_update(
+        incident_id=snapshot.get("incident_id", "INC-UNKNOWN"),
+        room_code=snapshot.get("room_code", "UNKNOWN"),
+        status=snapshot.get("status", "Active"),
+        summary=summary,
+        key_facts=key_facts,
+        active_actions=active_actions,
+        conflicts=conflicts,
+        unresolved_risks=unresolved_risks,
+    )
+
+
+@app.post("/api/integrations/pagerduty/trigger")
+async def trigger_pagerduty_incident(req: PagerDutyTriggerRequest):
+    """Trigger or synchronize a PagerDuty incident event."""
+    return await pagerduty_service.trigger_event(
+        incident_id=req.incident_id or "INC-UNKNOWN",
+        summary=req.summary,
+        severity=req.severity or "critical",
+    )
+
+
+@app.get("/api/integrations/monitoring/metrics")
+def get_monitoring_metrics():
+    """Get system telemetry metrics (live if configured, or explicitly tagged DEMO/SIMULATED)."""
+    return monitoring_service.get_current_metrics()
+
+
+@app.post("/api/integrations/monitoring/correlate")
+def correlate_monitoring_signal(req: MonitoringCorrelateRequest):
+    """
+    Correlate a monitoring metric signal into the incident room as a verified technical fact and timeline milestone.
+    """
+    incident = agora_convo_ai_manager.get_incident(req.incident_id)
+    signal_fact = f"Telemetry Signal: {req.metric_name} reported at {req.metric_value} (Source: {req.source})"
+
+    # Record as fact if not duplicate
+    facts = incident.setdefault("facts", [])
+    if not any(req.metric_name.lower() in f.get("text", "").lower() for f in facts):
+        fact_id = f"fact-mon-{len(facts)+1}"
+        now_ts = datetime.now().strftime("%H:%M:%S")
+        facts.append({
+            "id": fact_id,
+            "text": signal_fact,
+            "timestamp": now_ts,
+            "speaker": "Monitoring",
+        })
+        incident.setdefault("timeline", []).append({
+            "id": f"evt-mon-{int(time.time()*1000)}",
+            "item_id": fact_id,
+            "type": "fact",
+            "text": signal_fact,
+            "event": signal_fact,
+            "timestamp": now_ts,
+            "status": "Confirmed",
+        })
+        incident["last_updated"] = time.time()
+        agora_convo_ai_manager._reconcile_incident_items(incident)
+        agora_convo_ai_manager._save_persisted_incidents()
+
+    return agora_convo_ai_manager.get_incident_record_snapshot(incident.get("incident_id"))
 
 
 @app.post("/api/agora/token")

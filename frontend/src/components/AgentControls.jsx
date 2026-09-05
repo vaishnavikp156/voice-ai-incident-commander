@@ -102,10 +102,16 @@ export function AgentControls({
             </div>
             <div className="pbox-status">
               {isJoined ? (
-                <span className={`vol-tag ${userVolume > 10 ? "talking" : ""}`}>
-                  {userVolume > 10 ? <Volume2 size={12} className="wave-icon" /> : null}
-                  {isMuted ? "Muted" : userVolume > 10 ? "Speaking" : "Connected"}
-                </span>
+                isMuted ? (
+                  <span className="mic-status-tag mic-muted-tag">
+                    <MicOff size={11} /> Microphone Muted
+                  </span>
+                ) : (
+                  <span className={`mic-status-tag mic-live-tag ${userVolume > 10 ? "talking" : ""}`}>
+                    {userVolume > 10 ? <Volume2 size={11} className="wave-icon" /> : <Mic size={11} />}
+                    {userVolume > 10 ? "Microphone Live (Speaking)" : "Microphone Live"}
+                  </span>
+                )
               ) : (
                 <span className="idle-tag">Offline</span>
               )}
@@ -177,23 +183,23 @@ export function AgentControls({
           )}
         </button>
 
-        {/* 2. Mute / Unmute */}
+        {/* 2. Mute / Unmute Button */}
         <button
           type="button"
           className={`btn-ctrl ${isMuted ? "btn-muted" : "btn-unmuted"}`}
           onClick={onToggleMute}
           disabled={!isJoined}
-          title={!isJoined ? "Join room first to unmute" : "Toggle microphone"}
+          title={!isJoined ? "Join room first to activate microphone" : isMuted ? "Microphone is muted (Click to unmute)" : "Microphone is live (Click to mute)"}
         >
           {isMuted ? (
             <>
               <MicOff size={15} />
-              <span>Unmute Mic</span>
+              <span>Microphone Muted</span>
             </>
           ) : (
             <>
               <Mic size={15} />
-              <span>Mute Mic</span>
+              <span>Microphone Live</span>
             </>
           )}
         </button>

@@ -1,9 +1,11 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import "./App.css";
 
 import { ConnectionStatePill } from "./components/ConnectionStatePill";
 import { AgentControls } from "./components/AgentControls";
+import { IncidentSummary } from "./components/IncidentSummary";
 import { IncidentIntelligence } from "./components/IncidentIntelligence";
+import { IntegrationsPanel } from "./components/IntegrationsPanel";
 import { ConsoleLogs } from "./components/ConsoleLogs";
 import { SettingsModal } from "./components/SettingsModal";
 import { JoinRoomModal } from "./components/JoinRoomModal";
@@ -23,12 +25,23 @@ function App() {
   const [userUid] = useState(() => agoraService.uid);
   const [agentUid] = useState(9999);
 
-  // Participant Identity state
+  // Participant Identity state - Clean stale test names from localStorage if present
   const [displayName, setDisplayName] = useState(() => {
-    return localStorage.getItem("echo_display_name") || "Vaishnavi";
+    const saved = localStorage.getItem("echo_display_name");
+    if (saved === "Divyansh" || saved === "Vaishnavi") {
+      localStorage.removeItem("echo_display_name");
+      return "Responder";
+    }
+    return saved || "Responder";
   });
   const [userRole, setUserRole] = useState(() => {
-    return localStorage.getItem("echo_user_role") || "Incident Commander";
+    const savedRole = localStorage.getItem("echo_user_role");
+    const savedName = localStorage.getItem("echo_display_name");
+    if (savedName === "Divyansh" || savedName === "Vaishnavi") {
+      localStorage.removeItem("echo_user_role");
+      return "Incident Commander";
+    }
+    return savedRole || "Incident Commander";
   });
 
   const [isJoined, setIsJoined] = useState(false);
@@ -435,11 +448,14 @@ function App() {
   // Join Existing Incident Room with Code & Display Name
   const handleJoinExistingRoom = async ({ roomCode, displayName: newName, role: newRole }) => {
     lastStopTimestampRef.current = 0;
+    const cleanName = newName?.trim() || "Responder";
+    const cleanRole = newRole?.trim() || "Incident Responder";
+
     // Save identity locally
-    setDisplayName(newName);
-    setUserRole(newRole);
-    localStorage.setItem("echo_display_name", newName);
-    localStorage.setItem("echo_user_role", newRole);
+    setDisplayName(cleanName);
+    setUserRole(cleanRole);
+    localStorage.setItem("echo_display_name", cleanName);
+    localStorage.setItem("echo_user_role", cleanRole);
 
     // Leave current RTC channel if connected
     if (isJoined) {
@@ -466,7 +482,7 @@ function App() {
     }
 
     // Register participant
-    const updated = await apiService.joinIncidentRoom(inc.room_code || roomCode, userUid, newName, newRole);
+    const updated = await apiService.joinIncidentRoom(inc.room_code || roomCode, userUid, cleanName, cleanRole);
     if (updated) setIntelligence((prev) => ({ ...prev, ...updated }));
 
     // Update URL param
@@ -537,7 +553,13 @@ function App() {
 
         <div className="header-right">
           {/* User Display Name Tag */}
-          <div className="user-profile-badge" title="Your display name in this incident room">
+          <div
+            className="user-profile-badge"
+            onClick={() => setIsJoinModalOpen(true)}
+            role="button"
+            tabIndex={0}
+            title="Click to change your name / join incident room"
+          >
             <User size={12} className="text-cyan" />
             <span className="profile-name">{displayName}</span>
             <span className="profile-role">({userRole})</span>
@@ -657,12 +679,26 @@ function App() {
 
         {/* Right Column: Live Incident Intelligence & Operational Logs */}
         <div className="grid-col right-col">
+          {/* 1. Incident Overview, Missing Data & Recommendations */}
+          <IncidentSummary intelligence={intelligence} />
+
+          {/* 2. Structured Intelligence Board, Timeline & Spoken Transcript */}
           <IncidentIntelligence
             intelligence={intelligence}
             isAgentActive={isAgentActive}
             currentDisplayName={displayName}
             onUpdateActionStatus={handleUpdateActionStatus}
           />
+
+          {/* 3. External Integrations Hub (Jira, Slack, PagerDuty, Observability Telemetry) */}
+          <IntegrationsPanel
+            incidentId={intelligence.incident_id}
+            roomCode={intelligence.room_code || intelligence.incident_id}
+            intelligence={intelligence}
+            onAddLog={addLog}
+          />
+
+          {/* 4. Collapsible Developer Diagnostics Drawer */}
           <ConsoleLogs logs={logs} onClearLogs={() => setLogs([])} />
         </div>
       </main>
